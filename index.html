@@ -1,0 +1,1469 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>WAKO</title>
+    <!-- Tailwind CSS (CDN) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Alpine.js (轻量交互框架) -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <!-- Phosphor Icons 图标库 -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        /* 運転記録ダイアログ内：date/time はナチュラル幅を無効化し他の入力と同幅にする */
+        #driveModal input[type="date"],
+        #driveModal input[type="time"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            min-width: 0;
+            max-width: 100%;
+            box-sizing: border-box;
+        }
+        #driveModal input[type="date"]::-webkit-calendar-picker-indicator,
+        #driveModal input[type="time"]::-webkit-time-picker-indicator {
+            display: none;
+        }
+        #driveModal input[type="date"]::-webkit-date-and-time-value,
+        #driveModal input[type="time"]::-webkit-date-and-time-value,
+        #driveModal input[type="date"]::-webkit-datetime-edit,
+        #driveModal input[type="time"]::-webkit-datetime-edit {
+            min-width: 0;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased font-sans min-h-screen flex flex-col justify-between selection:bg-indigo-500 selection:text-white">
+
+    <div x-data="timecardApp()" x-init="initClock()">
+
+        <!-- 全画面エラー：トークン不正 / アカウント無効 / token未指定 -->
+        <div x-show="errorMessage" x-cloak
+             class="fixed inset-0 z-[80] bg-slate-50 flex items-center justify-center p-6">
+            <div class="w-full max-w-sm bg-white rounded-2xl shadow-xl border border-slate-100 p-8 text-center space-y-3">
+                <div class="w-16 h-16 mx-auto rounded-full bg-rose-50 text-rose-500 flex items-center justify-center">
+                    <i class="ph-bold ph-warning-circle text-3xl"></i>
+                </div>
+                <h2 class="font-bold text-slate-800 text-lg">アクセスできません</h2>
+                <p class="text-sm text-slate-500 leading-relaxed" x-text="errorMessage"></p>
+            </div>
+        </div>
+
+        <!-- トークン検証中のローディング -->
+        <div x-show="!ready" x-cloak
+             class="fixed inset-0 z-[75] bg-slate-50 flex flex-col items-center justify-center gap-3">
+            <i class="ph-bold ph-circle-notch animate-spin text-4xl text-indigo-500"></i>
+            <p class="text-sm text-slate-400">読み込み中...</p>
+        </div>
+
+        <div x-show="ready && !errorMessage" x-cloak class="max-w-md mx-auto w-full min-h-screen flex flex-col p-4 pb-8">
+        <!-- 顶部 Header: 用户信息 & Wi-Fi 状态 -->
+        <header class="space-y-3">
+            <div class="flex items-center justify-between bg-white p-3.5 rounded-2xl shadow-sm border border-slate-100">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-lg shadow-md shadow-indigo-100">
+                        <!-- 用户头像首字母/姓名 -->
+                        <span x-text="user.name.charAt(0)"></span>
+                    </div>
+                    <div>
+                        <h2 class="font-bold text-slate-800 leading-tight" x-text="user.name || '未ログイン'"></h2>
+                                            </div>
+                </div>
+                <!-- 接続状態表示 -->
+                <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-50 text-emerald-600 border border-emerald-200">
+                    <i class="ph-bold ph-wifi-high text-sm"></i>
+                    <span x-text="canRemote() ? 'オンライン' : '社内Wi-Fi接続中'"></span>
+                </div>
+            </div>
+        </header>
+
+        <!-- 实时时间展示（固定位置：所有页面距顶部一致） -->
+        <div class="text-center pt-8">
+            <div class="text-xs font-semibold tracking-widest text-slate-400 uppercase mb-1" x-text="currentDate"></div>
+            <div class="text-5xl font-extrabold text-slate-900 tracking-tight font-mono" x-text="currentTime"></div>
+            <p class="text-[11px] text-slate-400 mt-2 flex items-center justify-center gap-1">
+                <i class="ph-bold ph-shield-check text-emerald-500"></i> サーバー標準時間
+            </p>
+        </div>
+
+        <!-- 中间：打卡主区域 -->
+        <main class="w-full flex-1 flex flex-col justify-center gap-5 py-5 text-center">
+
+            <!-- 打卡操作区（状态机：未上班 → 在勤 → 中途退勤 → 已下班） -->
+            <div class="py-2 min-h-[300px] flex flex-col justify-center">
+
+                <!-- 1. 未打卡：上班打卡 -->
+                <template x-if="phase() === 'before_in'">
+                    <div class="relative flex justify-center items-center">
+                        <!-- 外层脉冲动画 -->
+                        <div class="absolute w-48 h-48 rounded-full bg-indigo-500/10 animate-[ping_3s_cubic-bezier(0,0,0.2,1)_infinite]" x-show="!loading"></div>
+
+<button
+                            @click="handlePunch('clock_in')"
+                            :disabled="loading"
+                            class="relative w-44 h-44 rounded-full bg-gradient-to-br from-indigo-500 to-indigo-600 text-white shadow-xl shadow-indigo-200 active:scale-95 transition-all duration-200 flex flex-col items-center justify-center border-4 border-white disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none">
+
+                            <i class="ph-bold text-3xl mb-1" :class="loading ? 'ph-spinner animate-spin' : 'ph-fingerprint'"></i>
+                            <span class="text-xl font-bold tracking-wider" x-text="loading ? '送信中...' : '出勤打刻'"></span>
+                            <span class="text-[11px] opacity-80 mt-1">タップして打刻</span>
+                        </button>
+                    </div>
+                </template>
+
+                <!-- 2. 在勤中：选择 中途退勤 / 下班打卡 + ランチタイム单选 -->
+                <template x-if="phase() === 'working'">
+                    <div class="space-y-5">
+                        <p class="text-xs text-slate-400 font-medium flex items-center justify-center gap-1.5">
+                            <i class="ph-bold ph-tree-structure text-indigo-400"></i>
+                            打刻が完了しました。次の操作を選択してください
+                        </p>
+
+<div class="grid gap-3" :class="canLeaveMidway() ? 'grid-cols-2' : 'grid-cols-1'">
+                            <!-- 中途退勤（仅一次，出勤后不再显示） -->
+                            <button x-show="canLeaveMidway()" @click="punchConfirmType='leave_out'; punchConfirmOpen=true"
+                                    :disabled="loading"
+                                    class="py-3.5 rounded-2xl border-2 border-amber-200 bg-amber-50 text-amber-700 font-bold text-sm active:scale-95 transition-all disabled:opacity-50 flex flex-col items-center gap-1">
+                                <i class="ph-bold ph-sign-out text-xl"></i>
+                                <span x-text="loading ? '送信中...' : '中途退勤'"></span>
+                            </button>
+
+                            <!-- 下班打卡（需先选择ランチタイム） -->
+                            <button @click="punchConfirmType='clock_out'; punchConfirmOpen=true"
+                                    :disabled="loading"
+                                    class="w-full py-3.5 rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-600 text-white font-bold text-sm shadow-lg shadow-indigo-200 active:scale-95 transition-all disabled:opacity-40 disabled:shadow-none flex flex-col items-center gap-1">
+                                <i class="ph-bold ph-house text-xl"></i>
+                                <span x-text="loading ? '送信中...' : '退勤打刻'"></span>
+                            </button>
+                        </div>
+
+                        <!-- ランチタイム 单选 -->
+                        <div class="bg-white rounded-2xl p-3.5 shadow-sm border border-slate-100 text-left">
+                            <p class="text-xs font-bold text-slate-400 mb-2 flex items-center gap-1.5">
+                                <i class="ph-bold ph-coffee text-rose-400"></i> ランチタイム
+                            </p>
+                            <div class="grid grid-cols-2 gap-2">
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="lunch" value="yes" class="sr-only"
+                                           :checked="lunch === 'yes'" @change="setLunch('yes')">
+                                    <div class="flex items-center justify-center gap-2 py-2.5 rounded-xl border-2 text-xs font-bold transition-all"
+                                         :class="lunch === 'yes' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'">
+                                        <span class="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0"
+                                              :class="lunch === 'yes' ? 'border-indigo-500' : 'border-slate-300'">
+                                            <span class="w-1.5 h-1.5 rounded-full bg-indigo-500" x-show="lunch === 'yes'"></span>
+                                        </span>
+                                        a. ランチタイム 有り
+                                    </div>
+                                </label>
+                                <label class="cursor-pointer">
+                                    <input type="radio" name="lunch" value="no" class="sr-only"
+                                           :checked="lunch === 'no'" @change="setLunch('no')">
+                                    <div class="flex items-center justify-center gap-2 py-2.5 rounded-xl border-2 text-xs font-bold transition-all"
+                                         :class="lunch === 'no' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'">
+                                        <span class="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center shrink-0"
+                                              :class="lunch === 'no' ? 'border-indigo-500' : 'border-slate-300'">
+                                            <span class="w-1.5 h-1.5 rounded-full bg-indigo-500" x-show="lunch === 'no'"></span>
+                                        </span>
+                                        b. ランチタイム 無い
+                                    </div>
+                                </label>
+                            </div>
+                            </div>
+                    </div>
+                </template>
+
+                <!-- 3. 中途退勤中：只显示 中途出勤（下班打卡消失） -->
+                <template x-if="phase() === 'out'">
+                    <div class="space-y-5">
+                        <div class="bg-amber-50 border border-amber-100 rounded-2xl py-3 px-4 text-xs text-amber-700 flex items-center justify-center gap-2">
+                            <i class="ph-bold ph-clock text-base"></i>
+                            中途退勤中（<span x-text="lastRecordTime('leave_out')"></span>）
+                        </div>
+
+                        <button @click="handlePunch('leave_in')"
+                                :disabled="loading"
+                                class="w-full py-4 rounded-2xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-lg shadow-emerald-200 active:scale-95 transition-all disabled:opacity-50 flex flex-col items-center justify-center gap-1">
+                            <i class="ph-bold ph-sign-in text-2xl"></i>
+                            <span class="font-bold text-base tracking-wide" x-text="loading ? '送信中...' : '中途出勤'"></span>
+                            <span class="text-[11px] opacity-85">職場に戻る・退勤打刻が再開されます</span>
+                        </button>
+                    </div>
+                </template>
+
+                <!-- 4. 已下班 -->
+                <template x-if="phase() === 'done'">
+                    <div class="bg-emerald-50 border border-emerald-100 rounded-2xl py-7 px-4 text-center space-y-1">
+                        <i class="ph-bold ph-check-circle text-5xl text-emerald-500"></i>
+                        <p class="font-bold text-emerald-700 mt-1">本日の打刻は完了しました</p>
+                        <p class="text-xs text-emerald-600/80">退勤打刻 <span class="font-bold" x-text="getRecordTime('clock_out')"></span></p>
+                    </div>
+                </template>
+            </div>
+
+            <!-- 打卡状态提示 -->
+            <template x-if="lastPunchMessage">
+                <p class="text-xs font-medium text-emerald-600 bg-emerald-50 inline-block px-3 py-1 rounded-full border border-emerald-100" x-text="lastPunchMessage"></p>
+            </template>
+        </main>
+
+        <!-- 底部：今日考勤明细卡片 -->
+        <section class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+            <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center justify-between">
+                <span>本日の打刻記録</span>
+                <button @click="openHistory()"
+                        class="flex items-center gap-1 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 px-2.5 py-1 rounded-full transition-colors normal-case tracking-normal">
+                    <i class="ph-bold ph-clock-counter-clockwise text-sm"></i>
+                    <span>過去の打刻記録を見る</span>
+                </button>
+            </h3>
+
+            <div class="grid grid-cols-2 gap-2.5">
+                <template x-for="slot in todaySlots" :key="slot.type">
+                    <div class="p-3 rounded-xl border transition-colors"
+                         :class="slot.filled ? 'bg-slate-50 border-slate-200' : 'bg-slate-50/50 border-dashed border-slate-200'">
+                        <div class="text-xs text-slate-400 mb-1 flex items-center gap-1">
+                            <i class="ph-bold" :class="slot.icon + ' ' + slot.color"></i>
+                            <span x-text="slot.label"></span>
+                        </div>
+                        <div class="text-sm font-bold" :class="slot.filled ? 'text-slate-700' : 'text-slate-400'" x-text="slot.time"></div>
+                    </div>
+                </template>
+            </div>
+        </section>
+
+        <!-- 機能ボタン（有权限用户） -->
+        <div x-show="user.cash_enabled || user.drive_enabled" class="mt-4 space-y-3">
+            <button x-show="user.cash_enabled" @click="openCash()"
+                    class="w-full py-3.5 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-lg shadow-emerald-200 active:scale-95 transition-all flex items-center justify-center gap-2">
+                <i class="ph-bold ph-bank text-xl"></i>
+                <span class="font-bold text-[15px]">現金入金</span>
+                <i class="ph ph-caret-right text-sm opacity-70"></i>
+            </button>
+            <button x-show="user.drive_enabled" @click="openDrive()"
+                    class="w-full py-3.5 rounded-2xl bg-gradient-to-r from-indigo-500 to-indigo-600 text-white shadow-lg shadow-indigo-200 active:scale-95 transition-all flex items-center justify-center gap-2">
+                <i class="ph-bold ph-car text-xl"></i>
+                <span class="font-bold text-[15px]">運転記録</span>
+                <i class="ph ph-caret-right text-sm opacity-70"></i>
+            </button>
+        </div>
+
+        <!-- 過去の打刻記録を見る 弹窗 -->
+        <div x-show="historyOpen" x-transition.opacity
+             class="fixed inset-0 z-50 bg-slate-900/50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+             @keydown.escape.window="historyOpen = false">
+
+            <div x-show="historyOpen" x-transition:enter="transition duration-200 ease-out"
+                 x-transition:enter-start="translate-y-8 opacity-0 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="translate-y-0 opacity-100 sm:scale-100"
+                 @click.outside="historyOpen = false"
+                 class="w-full max-w-2xl bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[85vh] flex flex-col">
+
+                <!-- 弹窗头部 -->
+                <div class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100 shrink-0">
+                    <div>
+                        <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                            <i class="ph-bold ph-calendar-check text-indigo-600 text-lg"></i> 過去の打刻記録
+                        </h3>
+                        <p class="text-xs text-slate-400 mt-0.5" x-text="'直近30日 全 ' + historyDays.length + ' 日分'"></p>
+                    </div>
+                    <button @click="historyOpen = false"
+                            class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors">
+                        <i class="ph-bold ph-x"></i>
+                    </button>
+                </div>
+
+                <!-- 记录列表（表格：便于查看多日多笔记录） -->
+                <div class="overflow-y-auto p-4">
+                    <template x-if="historyDays.length === 0">
+                        <div class="py-12 text-center text-slate-400 text-sm">
+                            <i class="ph-bold ph-notebook text-4xl block mb-2 text-slate-300"></i>
+                            打刻履歴はまだありません
+                        </div>
+                    </template>
+
+                    <template x-if="historyDays.length > 0">
+                        <div class="space-y-1.5">
+                            <!-- 表头 -->
+                            <div class="grid grid-cols-[64px_1fr_1fr_1fr_1fr_1fr_48px] gap-2 items-center px-3 text-[10px] font-bold text-slate-400">
+                                <span>日付</span>
+                                <span>出勤</span>
+                                <span>ランチ</span>
+                                <span>中途退勤</span>
+                                <span>中途出勤</span>
+                                <span>退勤</span>
+                                <span class="text-right">状態</span>
+                            </div>
+
+                            <template x-for="day in historyDays" :key="day.date">
+                                <div class="grid grid-cols-[64px_1fr_1fr_1fr_1fr_1fr_48px] gap-2 items-center px-3 py-2.5 rounded-xl border"
+                                     :class="dayRowClass(day)">
+                                    <div>
+                                        <div class="font-bold text-xs" :class="weekTextClass(day)" x-text="dayLabel(day.date)"></div>
+                                        <div class="text-[10px]" :class="weekTextClass(day)" x-text="'(' + weekLabel(day.date) + ')'"></div>
+                                    </div>
+                                    <span class="text-xs font-bold text-slate-700" x-text="rec(day, 'clock_in') || '-'"></span>
+                                    <span class="text-[10px] text-slate-500" x-text="lunchLabel(day)"></span>
+                                    <span class="text-xs text-slate-600" x-text="rec(day, 'leave_out') || '-'"></span>
+                                    <span class="text-xs text-slate-600" x-text="rec(day, 'leave_in') || '-'"></span>
+                                    <span class="text-xs font-bold" :class="day.done ? 'text-slate-700' : 'text-slate-300'" x-text="rec(day, 'clock_out') || '-'"></span>
+                                    <span class="justify-self-end text-[10px] px-1.5 py-0.5 rounded-full"
+                                          :class="day.done ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-amber-50 text-amber-600 border border-amber-100'"
+                                          x-text="day.done ? '完了' : '途中'"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- 現金入金 モーダル -->
+        <div x-show="cashOpen" x-transition.opacity
+             class="fixed inset-0 z-50 bg-slate-900/50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+             @keydown.escape.window="cashOpen = false, cashToast = ''">
+
+            <div x-show="cashOpen" x-transition:enter="transition duration-200 ease-out"
+                 x-transition:enter-start="translate-y-8 opacity-0 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="translate-y-0 opacity-100 sm:scale-100"
+                 @click.outside="cashOpen = false, cashToast = ''"
+                 class="w-full max-w-md bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[85vh] flex flex-col">
+
+                <!-- モーダル头部 -->
+                <div class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100 shrink-0">
+                    <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                        <i class="ph-bold ph-bank text-emerald-600 text-lg"></i> 現金入金
+                    </h3>
+                    <button @click="cashOpen = false, cashToast = ''"
+                            class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors">
+                        <i class="ph-bold ph-x"></i>
+                    </button>
+                </div>
+
+                <div class="overflow-y-auto p-4 space-y-4">
+                    <!-- 店铺单选 -->
+                    <div>
+                        <p class="text-xs font-bold text-slate-400 mb-2">店舗を選択</p>
+                        <div class="flex flex-wrap gap-1.5">
+                            <template x-for="s in cashShops" :key="s.code">
+                                <button @click="cashShop = s.code"
+                                        class="min-w-[18%] flex-1 py-2.5 rounded-xl border-2 font-bold text-sm transition-all"
+                                        :class="cashShop === s.code ? 'border-emerald-500 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'">
+                                    <span class="text-base" x-text="s.code"></span><br>
+                                    <span class="text-[10px] font-medium" x-text="s.name"></span>
+                                </button>
+                            </template>
+                        </div>
+                    </div>
+
+                    <!-- 金額输入 -->
+                    <div>
+                        <p class="text-xs font-bold text-slate-400 mb-1">当日売上金額（円）</p>
+                        <div class="relative">
+                            <span class="absolute left-4 top-1/2 -translate-y-1/2 text-sm font-bold text-slate-400">¥</span>
+                            <input x-model="cashAmount" type="number" min="0" step="1" inputmode="numeric"
+                                   placeholder="例：12500"
+                                   class="w-full border border-slate-200 rounded-xl pl-9 pr-4 py-3 text-center text-xl font-bold focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 outline-none">
+                        </div>
+                    </div>
+
+                    <!-- 確定按钮 -->
+                    <button @click="submitCash()" :disabled="cashSubmitting"
+                            class="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold shadow-lg shadow-emerald-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+                        <i class="ph-bold" :class="cashSubmitting ? 'ph-spinner animate-spin' : 'ph-check-bold'"></i>
+                        <span x-text="cashSubmitting ? '登録中...' : '確定'"></span>
+                    </button>
+
+                    <!-- 最近5次记录 -->
+                    <div>
+                        <p class="text-xs font-bold text-slate-400 mb-2">最近の記録（直近5件）</p>
+                        <template x-if="cashLogs.length === 0">
+                            <div class="py-8 text-center text-slate-400 text-sm">
+                                <i class="ph-bold ph-receipt text-4xl block mb-2 text-slate-300"></i>
+                                記録はまだありません
+                            </div>
+                        </template>
+                        <div class="space-y-2">
+                            <template x-for="log in cashLogs" :key="log.noted_at + ':' + log.shop">
+                                <div class="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-xl px-3 py-2.5">
+                                    <div class="flex items-center gap-2.5">
+                                        <span class="w-9 h-9 rounded-lg bg-emerald-50 text-emerald-600 font-bold flex items-center justify-center text-base border border-emerald-100" x-text="log.shop"></span>
+                                        <div>
+                                            <div class="text-sm font-bold text-slate-700" x-text="'¥' + cashDisplay(log.amount)"></div>
+                                            <div class="text-[10px] text-slate-400">
+                                                <span x-text="log.cash_date"></span> <span x-text="log.noted_at.slice(11)"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-white text-slate-500 border border-slate-200" x-text="shopName(log.shop)"></span>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 登録確認モーダル -->
+                <div x-show="cashConfirmOpen" x-transition.opacity
+                     class="fixed inset-0 z-[60] bg-slate-900/60 flex items-center justify-center p-5">
+                    <div x-show="cashConfirmOpen" x-transition:enter="transition duration-150 ease-out"
+                         x-transition:enter-start="scale-95 opacity-0"
+                         x-transition:enter-end="scale-100 opacity-100"
+                         @click.outside="cashConfirmOpen = false"
+                         class="w-full max-w-sm bg-white rounded-2xl p-5 text-center shadow-2xl">
+                        <div class="w-12 h-12 mx-auto rounded-full bg-emerald-50 text-emerald-500 flex items-center justify-center">
+                            <i class="ph-bold ph-bank text-xl"></i>
+                        </div>
+                        <h4 class="font-bold text-slate-800 mt-3">以下の内容で登録しますか？</h4>
+
+                        <div class="mt-4 bg-slate-50 border border-slate-100 rounded-xl divide-y divide-slate-100 text-sm text-left">
+                            <div class="flex justify-between px-4 py-2.5">
+                                <span class="text-slate-400">店舗</span>
+                                <span class="font-bold text-slate-700" x-text="shopName(cashConfirmShop)"></span>
+                            </div>
+                            <div class="flex justify-between px-4 py-2.5">
+                                <span class="text-slate-400">金額</span>
+                                <span class="font-bold text-emerald-600" x-text="'¥' + cashDisplay(cashConfirmAmount)"></span>
+                            </div>
+                            <div class="flex justify-between px-4 py-2.5">
+                                <span class="text-slate-400">日付</span>
+                                <span class="font-bold text-slate-700" x-text="confirmDate"></span>
+                            </div>
+                        </div>
+
+                        <p class="text-[11px] text-slate-400 mt-3">※ 同日・同店舗の場合は内容を更新します</p>
+
+                        <div class="grid grid-cols-2 gap-2 mt-4">
+                            <button @click="cashConfirmOpen = false"
+                                    class="py-3 rounded-xl bg-slate-100 text-slate-600 font-bold text-sm active:scale-95 transition-all">キャンセル</button>
+                            <button @click="confirmSubmitCash()" :disabled="cashSubmitting"
+                                    class="py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold text-sm shadow-lg shadow-emerald-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-1">
+                                <span x-text="cashSubmitting ? '登録中...' : '確認して登録'"></span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 現金入金 登録フィードバック（画面最上部に固定表示） -->
+        <div x-show="cashToast" x-transition:enter="transition duration-200 ease-out"
+             x-transition:enter-start="opacity-0 -translate-y-2"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition duration-150 ease-in"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0"
+             class="fixed top-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-sm px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2.5 text-sm pointer-events-none"
+             :class="cashToastError ? 'bg-rose-600 text-white' : 'bg-slate-900/90 text-white'">
+            <i class="ph-bold text-lg shrink-0" :class="cashToastError ? 'ph-warning-circle' : 'ph-check-circle'"></i>
+            <span class="font-bold leading-snug" x-text="cashToast"></span>
+        </div>
+
+        <!-- 運転記録 モーダル -->
+        <div x-show="driveOpen" x-transition.opacity
+             class="fixed inset-0 z-50 bg-slate-900/50 flex items-end justify-center p-0 sm:items-center sm:p-4"
+             @keydown.escape.window="driveOpen = false, driveToast = ''">
+
+            <div x-show="driveOpen" x-transition:enter="transition duration-200 ease-out"
+                 x-transition:enter-start="translate-y-8 opacity-0 sm:translate-y-0 sm:scale-95"
+                 x-transition:enter-end="translate-y-0 opacity-100 sm:scale-100"
+                 @click.outside="driveOpen = false, driveToast = ''"
+                 class="w-full max-w-md bg-white rounded-t-3xl sm:rounded-2xl shadow-2xl max-h-[85vh] flex flex-col"
+                 id="driveModal">
+
+                <!-- モーダル头部 -->
+                <div class="flex items-center justify-between px-5 pt-5 pb-3 border-b border-slate-100 shrink-0">
+                    <h3 class="font-bold text-slate-800 flex items-center gap-2">
+                        <i class="ph-bold ph-car text-indigo-600 text-lg"></i> 運転記録
+                    </h3>
+                    <button @click="driveOpen = false, driveToast = ''"
+                            class="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors">
+                        <i class="ph-bold ph-x"></i>
+                    </button>
+                </div>
+
+                <div class="overflow-y-auto p-4 space-y-4">
+                    <!-- 日付・車両選択 -->
+                    <div class="rounded-2xl bg-white border border-slate-200 shadow-sm p-4 space-y-3">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div class="min-w-0">
+                                <p class="text-xs font-bold text-slate-500 mb-2">日付</p>
+                                <div class="relative">
+                                    <i class="ph-bold ph-calendar-blank absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-base pointer-events-none"></i>
+                                    <input type="date" x-model="driveDate" disabled
+                                           class="w-full pl-10 pr-2 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 focus:ring-2 focus:ring-indigo-500/30 focus:outline-none transition-all disabled:opacity-100 disabled:text-slate-700">
+                                </div>
+                            </div>
+                            <div class="min-w-0">
+                                <p class="text-xs font-bold text-slate-500 mb-2">車両</p>
+                                <div class="relative">
+                                    <template x-if="drivePhase !== 'post'">
+                                        <div>
+<select x-model="driveCarId" @change="loadDriveToday()"
+                                                     class="appearance-none w-full pl-3.5 pr-10 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 focus:bg-white focus:ring-2 focus:ring-indigo-500/30 focus:outline-none transition-all">
+                                                <template x-for="c in driveCars" :key="c.id">
+                                                    <option :value="String(c.id)" x-text="c.plate"></option>
+                                                </template>
+                                            </select>
+                                            <i class="ph-bold ph-caret-down absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"></i>
+                                        </div>
+                                    </template>
+                                    <template x-if="drivePhase === 'post'">
+                                        <div class="w-full h-12 rounded-xl border border-slate-200 bg-slate-100 flex items-center px-3.5 gap-2 text-sm font-bold text-slate-700">
+                                            <i class="ph-bold ph-lock-simple text-slate-400"></i>
+                                            <span x-text="driveCarName()"></span>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 運転前チェック -->
+                    <div x-show="drivePhase === 'pre'" class="rounded-2xl bg-white border border-indigo-100 shadow-sm p-5 space-y-4">
+                        <p class="text-xs font-bold text-indigo-600 flex items-center gap-2">
+                            <span class="w-7 h-7 rounded-full bg-indigo-50 flex items-center justify-center">
+                                <i class="ph-bold ph-car-simple text-sm"></i>
+                            </span>
+                            運転前チェック
+                        </p>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div class="min-w-0">
+                                <p class="text-xs font-bold text-slate-500 mb-2">酒精測定値 <span class="text-rose-500">*</span></p>
+                                <input type="number" step="0.01" min="0" max="9.99" x-model="preValue" placeholder="0.00"
+                                       class="w-full px-3.5 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 placeholder:text-slate-300 focus:bg-white focus:ring-2 focus:ring-indigo-500/30 focus:outline-none transition-all">
+                            </div>
+                            <div class="min-w-0">
+                                <p class="text-xs font-bold text-slate-500 mb-2">測定時刻 <span class="text-rose-500">*</span></p>
+                                <div class="relative">
+                                    <i class="ph-bold ph-clock absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-base pointer-events-none"></i>
+                                    <input type="time" x-model="preTime"
+                                           class="w-full pl-10 pr-2 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 focus:bg-white focus:ring-2 focus:ring-indigo-500/30 focus:outline-none transition-all">
+                                </div>
+                            </div>
+                        </div>
+                        <div>
+                            <p class="text-xs font-bold text-slate-500 mb-2">確認方法</p>
+                            <div class="grid grid-cols-3 gap-2">
+                                <template x-for="m in [1, 2, 3]" :key="m">
+                                    <button @click="preMethod = m"
+                                            class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                            :class="preMethod === m ? 'border-indigo-500 bg-indigo-50 text-indigo-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'"
+                                            x-text="driveMethodLabel(m)"></button>
+                                </template>
+                            </div>
+                        </div>
+                        <div>
+                            <p class="text-xs font-bold text-slate-500 mb-2">酒気帯びの有無</p>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button @click="preResult = 0"
+                                        class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                        :class="preResult === 0 ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'">酒気帯び 無</button>
+                                <button @click="preResult = 1"
+                                        class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                        :class="preResult === 1 ? 'border-rose-500 bg-rose-50 text-rose-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'">酒気帯び 有</button>
+                            </div>
+                        </div>
+                        <button @click="submitDrive()" :disabled="driveSubmitting"
+                                class="mt-1 w-full py-4 rounded-2xl bg-gradient-to-r from-indigo-500 to-indigo-600 text-white font-bold text-sm shadow-lg shadow-indigo-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+                            <i class="ph-bold text-lg" :class="driveSubmitting ? 'ph-spinner animate-spin' : 'ph-car-simple'"></i>
+                            <span x-text="driveSubmitting ? '送信中...' : '運転前を記録'"></span>
+                        </button>
+                    </div>
+
+                    <!-- 運転後チェック -->
+                    <div x-show="drivePhase === 'post'" class="space-y-3.5">
+                        <div class="rounded-2xl bg-slate-50 border border-slate-100 p-3 text-xs text-slate-500 space-y-1">
+                            <p class="font-bold text-slate-600 flex items-center gap-1">
+                                <i class="ph-bold ph-check-circle text-emerald-500"></i> 運転前（登録済み）
+                            </p>
+                            <p>酒精測定値 <span class="font-bold text-slate-700" x-text="preValue"></span> mg/L ・ <span x-text="preTime"></span></p>
+                            <p>確認方法 <span class="font-bold text-slate-700" x-text="driveMethodLabel(preMethod)"></span> ・ 酒気帯び <span class="font-bold text-slate-700" x-text="driveResultLabel(preResult)"></span></p>
+                        </div>
+
+                        <div class="rounded-2xl bg-white border border-slate-200 shadow-sm p-5 space-y-4">
+                            <p class="text-xs font-bold text-emerald-600 flex items-center gap-2">
+                                <span class="w-7 h-7 rounded-full bg-emerald-50 flex items-center justify-center">
+                                    <i class="ph-bold ph-car-simple text-sm"></i>
+                                </span>
+                                運転後チェック
+                            </p>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div class="min-w-0">
+                                    <p class="text-xs font-bold text-slate-500 mb-2">酒精測定値 <span class="text-rose-500">*</span></p>
+                                    <input type="number" step="0.01" min="0" max="9.99" x-model="postValue" placeholder="0.00"
+                                           class="w-full px-3.5 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 placeholder:text-slate-300 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:outline-none transition-all">
+                                </div>
+                                <div class="min-w-0">
+                                    <p class="text-xs font-bold text-slate-500 mb-2">測定時刻 <span class="text-rose-500">*</span></p>
+                                    <div class="relative">
+                                        <i class="ph-bold ph-clock absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-base pointer-events-none"></i>
+                                        <input type="time" x-model="postTime"
+                                               class="w-full pl-10 pr-2 h-12 rounded-xl border border-slate-200 bg-slate-50 text-sm text-slate-700 focus:bg-white focus:ring-2 focus:ring-emerald-500/30 focus:outline-none transition-all">
+                                    </div>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">確認方法</p>
+                                <div class="grid grid-cols-3 gap-2">
+                                    <template x-for="m in [1, 2, 3]" :key="m">
+                                        <button @click="postMethod = m"
+                                                class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                                :class="postMethod === m ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'"
+                                                x-text="driveMethodLabel(m)"></button>
+                                    </template>
+                                </div>
+                            </div>
+                            <div>
+                                <p class="text-xs font-bold text-slate-500 mb-2">酒気帯びの有無</p>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <button @click="postResult = 0"
+                                            class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                            :class="postResult === 0 ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'">酒気帯び 無</button>
+                                    <button @click="postResult = 1"
+                                            class="py-3 rounded-xl border-2 text-xs font-bold transition-all"
+                                            :class="postResult === 1 ? 'border-rose-500 bg-rose-50 text-rose-700 shadow-sm' : 'border-slate-200 bg-white text-slate-500'">酒気帯び 有</button>
+                                </div>
+                            </div>
+                            <div class="space-y-2">
+                                <p class="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                                    <i class="ph-bold ph-note-pencil text-slate-400"></i> その他の指示事項
+                                </p>
+                                <textarea x-model="driveNotes" rows="3" maxlength="1000"
+                                          placeholder="指示・伝達事項があれば入力してください（任意）"
+                                          class="w-full px-3.5 py-3 rounded-xl border border-slate-200 bg-white text-sm text-slate-700 placeholder:text-slate-300 focus:ring-2 focus:ring-emerald-500/30 focus:outline-none transition-all resize-none"></textarea>
+                            </div>
+                            <button @click="submitDrive()" :disabled="driveSubmitting"
+                                    class="mt-1 w-full py-4 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold text-sm shadow-lg shadow-emerald-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+                                <i class="ph-bold text-lg" :class="driveSubmitting ? 'ph-spinner animate-spin' : 'ph-car-simple'"></i>
+                                <span x-text="driveSubmitting ? '送信中...' : '運転後を記録'"></span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 完了表示 -->
+                    <div x-show="drivePhase === 'done'" class="rounded-2xl bg-emerald-50 border border-emerald-100 p-5 text-center space-y-3">
+                        <i class="ph-bold ph-check-circle text-4xl text-emerald-500"></i>
+                        <p class="font-bold text-emerald-700">今回の運転記録は完了しています</p>
+                        <div class="text-left text-xs text-slate-600 bg-white rounded-xl border border-slate-100 divide-y divide-slate-100">
+                            <div class="flex justify-between px-3 py-2">
+                                <span class="text-slate-400">運転前</span>
+                                <span class="font-bold" x-text="preValue + ' mg/L / ' + preTime + ' / ' + driveMethodLabel(preMethod)"></span>
+                            </div>
+                            <div class="flex justify-between px-3 py-2">
+                                <span class="text-slate-400">運転後</span>
+                                <span class="font-bold" x-text="postValue + ' mg/L / ' + postTime + ' / ' + driveMethodLabel(postMethod)"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 最近の記録 -->
+                    <template x-if="driveLogs.length > 0">
+                        <div>
+                            <p class="text-xs font-bold text-slate-400 mb-2">最近の記録（直近20件）</p>
+                            <div class="space-y-2">
+                                <template x-for="log in driveLogs" :key="log.id">
+                                    <div class="flex items-center justify-between gap-2 bg-slate-50 border border-slate-100 rounded-xl px-3 py-2.5">
+                                        <div class="min-w-0">
+                                            <div class="text-xs font-bold text-slate-700 truncate">
+                                                <span x-text="driveDayLabel(log.drv_date)"></span>
+                                                <span class="font-normal text-slate-500" x-text="' ' + log.car"></span>
+                                            </div>
+                                            <div class="text-[11px] text-slate-400 truncate"
+                                                  x-text="(log.pre ? '運転前 ' + log.pre.value + ' mg/L' : '') + (log.post ? ' / 運転後 ' + log.post.value + ' mg/L' : '')"></div>
+                                        </div>
+                                        <span class="text-[10px] px-2 py-0.5 rounded-full shrink-0"
+                                              :class="log.post ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-amber-50 text-amber-600 border border-amber-100'"
+                                              x-text="log.post ? '完了' : '運転前のみ'"></span>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- 登録確認モーダル -->
+            <div x-show="driveConfirmOpen" x-transition.opacity
+                 class="fixed inset-0 z-[60] bg-slate-900/60 flex items-center justify-center p-5"
+                 @keydown.escape.window="driveConfirmOpen = false">
+                <div x-show="driveConfirmOpen" x-transition:enter="transition duration-150 ease-out"
+                     x-transition:enter-start="scale-95 opacity-0"
+                     x-transition:enter-end="scale-100 opacity-100"
+                     @click.outside="driveConfirmOpen = false"
+                     class="w-full max-w-sm bg-white rounded-2xl p-5 text-center shadow-2xl">
+                    <div class="w-12 h-12 mx-auto rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center">
+                        <i class="ph-bold ph-car-simple text-xl"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-800 mt-3"
+                        x-text="driveConfirmPhase === 'post' ? '運転後のチェック内容を登録しますか？' : '運転前のチェック内容を登録しますか？'"></h4>
+
+                    <div class="mt-4 bg-slate-50 border border-slate-100 rounded-xl divide-y divide-slate-100 text-sm text-left">
+                        <!-- 運転後確認時：運転前の登録済み摘要 -->
+                        <template x-if="driveConfirmPhase === 'post'">
+                            <div class="px-4 py-2.5">
+                                <p class="text-[10px] font-bold text-slate-400 mb-1">運転前（登録済み）</p>
+                                <p class="font-bold text-slate-700 text-xs">
+                                    <span x-text="preValue + ' mg/L / ' + preTime"></span>
+                                    <span class="font-normal text-slate-500" x-text="' / ' + driveMethodLabel(preMethod)"></span>
+                                    <span class="font-normal text-slate-500" x-text="' / 酒気帯び ' + driveResultLabel(preResult)"></span>
+                                </p>
+                            </div>
+                        </template>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">日付</span>
+                            <span class="font-bold text-slate-700" x-text="driveDate"></span>
+                        </div>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">車両</span>
+                            <span class="font-bold text-slate-700" x-text="driveCarName()"></span>
+                        </div>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">酒精測定値</span>
+                            <span class="font-bold text-slate-700" x-text="(driveConfirmPhase === 'post' ? postValue : preValue) + ' mg/L'"></span>
+                        </div>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">測定時刻</span>
+                            <span class="font-bold text-slate-700" x-text="driveConfirmPhase === 'post' ? postTime : preTime"></span>
+                        </div>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">確認方法</span>
+                            <span class="font-bold text-slate-700" x-text="driveMethodLabel(driveConfirmPhase === 'post' ? postMethod : preMethod)"></span>
+                        </div>
+                        <div class="flex justify-between px-4 py-2.5">
+                            <span class="text-slate-400">酒気帯び</span>
+                            <span class="font-bold text-slate-700" x-text="driveResultLabel(driveConfirmPhase === 'post' ? postResult : preResult)"></span>
+                        </div>
+                        <template x-if="driveConfirmPhase === 'post' && driveNotes && driveNotes.trim()">
+                            <div class="px-4 py-2.5">
+                                <p class="text-[10px] font-bold text-slate-400 mb-1">その他の指示事項</p>
+                                <p class="font-bold text-slate-700 text-xs whitespace-pre-wrap" x-text="driveNotes"></p>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-2 mt-4">
+                        <button @click="driveConfirmOpen = false"
+                                class="py-3 rounded-xl bg-slate-100 text-slate-600 font-bold text-sm active:scale-95 transition-all">キャンセル</button>
+                        <button @click="confirmSubmitDrive()" :disabled="driveSubmitting"
+                                class="py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-indigo-600 text-white font-bold text-sm shadow-lg shadow-indigo-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-1">
+                            <i class="ph-bold" :class="driveSubmitting ? 'ph-spinner animate-spin' : 'ph-check-bold'"></i>
+                            <span x-text="driveSubmitting ? '登録中...' : '確認して登録'"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 運転記録 登録フィードバック（画面最上部に固定表示） -->
+        <div x-show="driveToast" x-transition:enter="transition duration-200 ease-out"
+             x-transition:enter-start="opacity-0 -translate-y-2"
+             x-transition:enter-end="opacity-100 translate-y-0"
+             x-transition:leave="transition duration-150 ease-in"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0"
+             class="fixed top-4 left-1/2 -translate-x-1/2 z-[70] w-[calc(100%-2rem)] max-w-sm px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2.5 text-sm pointer-events-none"
+             :class="driveToastError ? 'bg-rose-600 text-white' : 'bg-slate-900/90 text-white'">
+            <i class="ph-bold text-lg shrink-0" :class="driveToastError ? 'ph-warning-circle' : 'ph-check-circle'"></i>
+            <span class="font-bold leading-snug" x-text="driveToast"></span>
+        </div>
+
+        <!-- 打刻確認モーダル -->
+        <div x-show="punchConfirmOpen" x-transition.opacity
+             class="fixed inset-0 z-[60] bg-slate-900/60 flex items-center justify-center p-5"
+             @keydown.escape.window="punchConfirmOpen = false">
+            <div x-show="punchConfirmOpen" x-transition:enter="transition duration-150 ease-out"
+                 x-transition:enter-start="scale-95 opacity-0"
+                 x-transition:enter-end="scale-100 opacity-100"
+                 @click.outside="punchConfirmOpen = false"
+                 class="w-full max-w-sm bg-white rounded-2xl p-5 text-center shadow-2xl">
+                <div class="w-12 h-12 mx-auto rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center">
+                    <i class="ph-bold ph-clock text-xl"></i>
+                </div>
+                <h4 class="font-bold text-slate-800 mt-3"
+                    x-text="punchConfirmType === 'leave_out' ? '中途退勤を登録しますか？' : '退勤打刻を登録しますか？'"></h4>
+
+                <p class="text-[11px] text-slate-400 mt-3"
+                   x-show="punchConfirmType === 'clock_out'">※ ランチタイムを選択済みの場合は反映されます</p>
+
+                <div class="grid grid-cols-2 gap-2 mt-4">
+                    <button @click="punchConfirmOpen = false"
+                            class="py-3 rounded-xl bg-slate-100 text-slate-600 font-bold text-sm active:scale-95 transition-all">キャンセル</button>
+                    <button @click="handlePunch(punchConfirmType)" :disabled="loading"
+                            class="py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-indigo-600 text-white font-bold text-sm shadow-lg shadow-indigo-200 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-1">
+                        <span x-text="loading ? '登録中...' : '確認して登録'"></span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        </div>
+
+    </div>
+
+    <!-- 前端核心交互逻辑：用 Alpine.js 管理状态与接口调用 -->
+    <script>
+        /**
+         * 打卡应用的主状态与方法集合。
+         * 由根节点的 x-data="timecardApp()" 挂载，x-init="initClock()" 启动。
+         */
+        function timecardApp() {
+            return {
+                // 从 URL ?token= 读取的用户令牌
+                token: '',
+                // 当前登录用户信息（name/id/权限等）
+                user: { name: '' },
+                // 打刻请求进行中标记
+                loading: false,
+                // 顶部显示的日期与时间（服务器时间）
+                currentDate: '',
+                currentTime: '',
+                // 与服务器的时差（毫秒），用于抵消客户端时区/时钟误差
+                serverOffset: 0,
+                // 打刻后的一次性提示文案
+                lastPunchMessage: '',
+
+                // 今日打刻记录（clock_in / leave_out / leave_in / clock_out）
+                records: [],
+                // 午餐选择：'yes'（默认） | 'no'
+                lunch: 'yes',
+
+                // 打刻确认弹窗
+                punchConfirmOpen: false,
+                punchConfirmType: null,
+                punchSubmitting: false,
+
+                // 历史打刻记录弹窗
+                historyOpen: false,
+                historyDays: [],
+
+                // 现金入金
+                cashOpen: false,
+                cashShops: [],
+                cashShop: '',
+                cashAmount: '',
+                cashLogs: [],
+                cashSubmitting: false,
+                cashToast: '',
+                cashToastError: false,
+                cashToastTimer: null,
+                cashConfirmOpen: false,
+                cashConfirmShop: 'A',
+                cashConfirmAmount: 0,
+
+                // 運転記録
+                driveOpen: false,
+                driveCars: [],
+                driveCarId: '',
+                driveDate: '',
+                drivePhase: 'pre',
+                driveRecordId: 0,
+                preValue: 0,
+                preTime: '',
+                preMethod: 1,
+                preResult: 0,
+                postValue: 0,
+                postTime: '',
+                postMethod: 1,
+                postResult: 0,
+                driveLogs: [],
+                driveNotes: '',
+                driveConfirmOpen: false,
+                driveConfirmPhase: 'pre',
+                driveSubmitting: false,
+                driveToast: '',
+                driveToastError: false,
+                driveToastTimer: null,
+
+                // 全屏错误提示（token 无效 / 账号停用 / 未提供 token）
+                errorMessage: '',
+                // 令牌校验完成前不显示主内容，避免闪现
+                ready: false,
+
+                // 初始化：读取 token、启动时钟、加载用户
+                initClock() {
+                    const params = new URLSearchParams(location.search);
+                    this.token = params.get('token') || '';
+                    this.updateTime();
+                    setInterval(() => this.updateTime(), 1000);
+                    this.loadUser();
+                },
+
+                // 刷新顶部日期时间（按服务器时间、JST 显示）
+                updateTime() {
+                    const now = this.serverNow();
+                    this.currentDate = now.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo' });
+                    this.currentTime = now.toLocaleTimeString('ja-JP', { hour12: false, timeZone: 'Asia/Tokyo' });
+                },
+
+                // 服务器基准的当前时刻（用 serverOffset 抵消客户端时区/时钟误差）
+                serverNow() {
+                    return new Date(Date.now() + this.serverOffset);
+                },
+
+                // 加载当前用户；token 无效或账号停用时进入全屏错误状态
+                async loadUser() {
+                    if (!this.token) {
+                        this.user = { name: '' };
+                        this.errorMessage = 'URL に ?token=... を指定してください';
+                        this.ready = true;
+                        return;
+                    }
+                    try {
+                        const res = await this.api('me', {});
+                        // 用服务器时间计算时差，供后续日期/时刻校正
+                        if (res.time) {
+                            this.serverOffset = (res.time * 1000) - Date.now();
+                        }
+                        this.user.name = res.user.name;
+                        this.user.id = res.user.id;
+                        this.user.cash_enabled = res.user.cash_enabled === 1;
+                        this.user.remote_punch = res.user.remote_punch === 1;
+                        this.user.drive_enabled = res.user.drive_enabled === 1;
+                        this.user.default_car_id = res.user.default_car_id || null;
+                        await this.loadTodayRecords();
+                        this.errorMessage = '';
+                    } catch (err) {
+                        this.user = { name: '' };
+                        if (err.message === 'user_inactive') {
+                            this.errorMessage = 'アカウントが無効です。会社へご連絡ください。';
+                        } else {
+                            this.errorMessage = 'トークンが無効です';
+                        }
+                    } finally {
+                        this.ready = true;
+                    }
+                },
+
+                // 统一的 API 请求封装：自动附带 token，失败时抛出 error 代码
+                async api(action, params = {}, method = 'GET') {
+                    let url = 'api.php?action=' + encodeURIComponent(action);
+                    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+                    if (method === 'GET') {
+                        url += '&' + new URLSearchParams({ ...params, token: this.token }).toString();
+                    } else {
+                        opts.body = JSON.stringify({ ...params, token: this.token });
+                    }
+                    const res = await fetch(url, opts);
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || !data.ok) {
+                        throw new Error((data && data.error) || 'api_error');
+                    }
+                    return data;
+                },
+
+                // 是否允许远程打卡（用于顶部网络状态显示）
+                canRemote() {
+                    return this.user.remote_punch === true;
+                },
+
+                // 加载今日打刻记录与午餐设置
+                async loadTodayRecords() {
+                    try {
+                        const res = await this.api('today', {});
+                        this.records = res.records || [];
+                        this.lunch = res.lunch || 'yes';
+                    } catch (err) {
+                        this.records = [];
+                        this.lunch = 'yes';
+                    }
+                },
+
+                // ===== 打刻状态机 =====
+                // before_in=未上班 / working=在勤 / out=中途退勤 / done=已下班
+                phase() {
+                    if (this.records.length === 0) return 'before_in';
+                    const last = this.records[this.records.length - 1].type;
+                    if (last === 'clock_out') return 'done';
+                    if (last === 'leave_out') return 'out';
+                    return 'working';
+                },
+
+                // 是否允许中途退勤（仅出勤打刻后、且尚未中途退勤时可以）
+                canLeaveMidway() {
+                    const last = this.records.length ? this.records[this.records.length - 1].type : null;
+                    return last === 'clock_in';
+                },
+
+                // 设置当天午餐（失败则回滚）
+                async setLunch(value) {
+                    const prev = this.lunch;
+                    this.lunch = value;
+                    this.lastPunchMessage = '';
+                    try {
+                        await this.api('set_lunch', { lunch: value }, 'POST');
+                    } catch (err) {
+                        this.lunch = prev;
+                        this.lastPunchMessage = err.message === 'already_clocked_out'
+                            ? '退勤済みのためランチ設定は変更できません'
+                            : 'ランチ設定を保存できませんでした';
+                    }
+                },
+
+                // ===== 現金入金 =====
+                // 打开现金入金弹窗：加载店铺与最近记录
+                async openCash() {
+                    this.cashShop = '';
+                    this.cashAmount = '';
+                    this.cashToast = '';
+                    this.cashToastError = false;
+                    this.cashConfirmOpen = false;
+                    await this.loadShops();
+                    if (this.cashShops.length) this.cashShop = this.cashShops[0].code;
+                    await this.loadCashHistory();
+                    this.cashOpen = true;
+                },
+
+                // 加载有效店铺列表
+                async loadShops() {
+                    try {
+                        const res = await this.api('shops', {});
+                        this.cashShops = res.shops || [];
+                    } catch (err) {
+                        this.cashShops = [];
+                    }
+                },
+
+                // 根据店铺代码取得名称
+                shopName(code) {
+                    const s = this.cashShops.find(x => x.code === code);
+                    return s ? s.name : code;
+                },
+
+                // 加载最近 5 条现金入金记录
+                async loadCashHistory() {
+                    try {
+                        const res = await this.api('cash_history', {});
+                        this.cashLogs = res.logs || [];
+                    } catch (err) {
+                        this.cashLogs = [];
+                    }
+                },
+
+                // 金额千分位显示
+                cashDisplay(x) {
+                    return Number(x).toLocaleString('ja-JP');
+                },
+
+                // 服务器基准的日期（JST, YYYY-MM-DD）
+                serverDate() {
+                    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(this.serverNow());
+                },
+
+                // 服务器基准的时刻（JST, HH:MM）
+                serverHM() {
+                    return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(this.serverNow());
+                },
+
+                // ===== 運転記録 =====
+                // 今日日期（JST）
+                todayVal() {
+                    return this.serverDate();
+                },
+
+                // 当前时刻 HH:MM（JST，用作默认测定时刻）
+                nowHM() {
+                    return this.serverHM();
+                },
+
+                // 打开運転記録弹窗：加载车辆、当天已有记录、历史记录
+                async openDrive() {
+                    this.driveToast = '';
+                    this.driveToastError = false;
+                    this.driveDate = this.todayVal();
+                    await this.loadDriveCars();
+                    // 先看当天是否已有记录（不分车辆）
+                    const latest = await this.api('drive_today', { date: this.driveDate }).catch(() => ({ record: null }));
+                    if (latest.record) {
+                        // 已有记录则直接进入对应阶段（运転前/后）
+                        this.applyDriveRecord(latest.record);
+                    } else {
+                        // 否则选定默认车辆（用户默认车 > 第一辆）
+                        this.driveCarId = (this.driveCars.length && this.user.default_car_id && this.driveCars.some(c => String(c.id) === String(this.user.default_car_id))) ? String(this.user.default_car_id) : (this.driveCars.length ? String(this.driveCars[0].id) : '');
+                        await this.loadDriveToday();
+                    }
+                    await this.loadDriveHistory();
+                    this.driveOpen = true;
+                },
+
+                // 加载有效车辆列表
+                async loadDriveCars() {
+                    try {
+                        const res = await this.api('cars', {});
+                        this.driveCars = res.cars || [];
+                    } catch (err) {
+                        this.driveCars = [];
+                    }
+                },
+
+                // 加载当天指定车辆的運転記録并切换到对应阶段
+                async loadDriveToday() {
+                    if (!this.driveDate || !this.driveCarId) {
+                        if (this.driveCars.length && !this.driveCarId) {
+                            this.driveCarId = String((this.user.default_car_id && this.driveCars.some(c => String(c.id) === String(this.user.default_car_id))) ? this.user.default_car_id : this.driveCars[0].id);
+                        }
+                        if (!this.driveCarId) return;
+                    }
+                    try {
+                        const res = await this.api('drive_today', { date: this.driveDate, car_id: this.driveCarId });
+                        const rec = res.record;
+                        if (!rec) {
+                            // 无记录：进入運転前登记，默认值为 0、当前时刻
+                            this.drivePhase = 'pre';
+                            this.driveRecordId = 0;
+                            this.preValue = 0;
+                            this.preTime = this.nowHM();
+                            this.preMethod = 1;
+                            this.preResult = 0;
+                            this.postValue = 0;
+                            this.postTime = '';
+                            this.driveNotes = '';
+                            return;
+                        }
+                        this.applyDriveRecord(rec);
+                    } catch (err) {
+                        this.drivePhase = 'pre';
+                    }
+                },
+
+                // 把服务器返回的運転記録套用到表单，并根据是否已有運転後决定阶段
+                applyDriveRecord(rec) {
+                    this.driveRecordId = rec.id;
+                    this.driveCarId = String(rec.car_id);
+                    this.driveNotes = rec.notes || '';
+                    if (rec.pre) {
+                        this.preValue = String(rec.pre.value);
+                        this.preTime = String(rec.pre.time).slice(0, 5);
+                        this.preMethod = rec.pre.method;
+                        this.preResult = rec.pre.result;
+                    }
+                    if (rec.post) {
+                        // 運転前後都已完成
+                        this.postValue = String(rec.post.value);
+                        this.postTime = String(rec.post.time).slice(0, 5);
+                        this.postMethod = rec.post.method;
+                        this.postResult = rec.post.result;
+                        this.drivePhase = 'done';
+                    } else {
+                        // 仅完成運転前，进入運転後登记
+                        this.postValue = 0;
+                        this.postTime = this.nowHM();
+                        this.postMethod = 1;
+                        this.postResult = 0;
+                        this.drivePhase = 'post';
+                    }
+                },
+
+                // 校验運転前/運転後表单：测定值 0~9.99 且时刻必填
+                driveCheckValid(p) {
+                    const value = Number(this[p + 'Value']);
+                    if (this[p + 'Value'] === '' || !isFinite(value) || value < 0 || value > 9.99) return false;
+                    if (!this[p + 'Time']) return false;
+                    return true;
+                },
+
+                // 提交前先校验，通过后打开确认弹窗
+                async submitDrive() {
+                    const p = this.drivePhase === 'post' ? 'post' : 'pre';
+                    if (!this.driveCheckValid(p)) {
+                        this.driveToast = '測定値と測定時刻を正しく入力してください';
+                        this.driveToastError = true;
+                        return;
+                    }
+                    this.driveConfirmPhase = p;
+                    this.driveConfirmOpen = true;
+                },
+
+                // 确认后真正提交運転前/運転後记录
+                async confirmSubmitDrive() {
+                    const p = this.driveConfirmPhase;
+                    this.driveSubmitting = true;
+                    this.driveToast = '';
+                    if (this.driveToastTimer) { clearTimeout(this.driveToastTimer); this.driveToastTimer = null; }
+                    try {
+                        if (p === 'pre') {
+                            await this.api('drive_log', {
+                                phase: 'pre',
+                                date: this.driveDate,
+                                car_id: this.driveCarId,
+                                value: Number(this.preValue),
+                                time: this.preTime,
+                                method: this.preMethod,
+                                result: this.preResult,
+                            }, 'POST');
+                            // 成功后进入運転後登记
+                            this.drivePhase = 'post';
+                            this.postTime = this.nowHM();
+                            this.driveToast = '運転前の記録を登録しました。運転後の記録を入力してください';
+                        } else {
+                            await this.api('drive_log', {
+                                phase: 'post',
+                                id: this.driveRecordId,
+                                value: Number(this.postValue),
+                                time: this.postTime,
+                                method: this.postMethod,
+                                result: this.postResult,
+                                notes: this.driveNotes,
+                            }, 'POST');
+                            this.drivePhase = 'done';
+                            this.driveNotes = '';
+                            this.driveToast = '運転後まで登録が完了しました';
+                        }
+                        this.driveToastError = false;
+                        this.driveConfirmOpen = false;
+                        if (this.driveToastTimer) clearTimeout(this.driveToastTimer);
+                        this.driveToastTimer = setTimeout(() => { this.driveToast = ''; }, 4000);
+                        await this.loadDriveToday();
+                        await this.loadDriveHistory();
+                    } catch (err) {
+                        // 当天还有别的车未完成運転後
+                        if (err.message === 'pending_post') {
+                            this.driveToast = '別の車の運転後を先に登録してください';
+                            this.driveToastError = true;
+                            this.driveConfirmOpen = false;
+                            const latest = await this.api('drive_today', { date: this.driveDate }).catch(() => ({ record: null }));
+                            if (latest.record) this.applyDriveRecord(latest.record);
+                        // 该车记录已完成，禁止覆盖
+                        } else if (err.message === 'already_completed') {
+                            this.driveToast = 'この車の運転記録は既に完了しています';
+                            this.driveToastError = true;
+                            this.driveConfirmOpen = false;
+                            await this.loadDriveToday();
+                        } else {
+                            this.driveToast = '登録に失敗しました';
+                            this.driveToastError = true;
+                        }
+                    } finally {
+                        this.driveSubmitting = false;
+                    }
+                },
+
+                // 加载最近 20 条運転記録
+                async loadDriveHistory() {
+                    try {
+                        const res = await this.api('drive_history', {});
+                        this.driveLogs = res.logs || [];
+                    } catch (err) {
+                        this.driveLogs = [];
+                    }
+                },
+
+                // 根据车辆 ID 显示车牌
+                driveCarName() {
+                    const c = this.driveCars.find(x => String(x.id) === String(this.driveCarId));
+                    return c ? c.plate : '-';
+                },
+
+                // 确认方法显示：1=IT / 2=当面 / 3=电话
+                driveMethodLabel(m) {
+                    return { 1: 'IT', 2: '対面', 3: '電話' }[m] || '-';
+                },
+
+                // 酒气有无显示：1=有 / 其他=无
+                driveResultLabel(r) {
+                    return r === 1 ? '有' : '無';
+                },
+
+                // 把 YYYY-MM-DD 显示为 M/D
+                driveDayLabel(date) {
+                    const p = String(date).split('-');
+                    return p.length === 3 ? Number(p[1]) + '/' + Number(p[2]) : date;
+                },
+
+                // 现金入金确认弹窗显示的日期（JST）
+                get confirmDate() {
+                    return this.serverDate();
+                },
+
+                // 校验金额并打开确认弹窗
+                async submitCash() {
+                    const raw = String(this.cashAmount).trim();
+                    if (raw === '') {
+                        this.cashToast = '金額を入力してください';
+                        this.cashToastError = true;
+                        return;
+                    }
+                    const amount = Number(raw);
+                    if (!Number.isInteger(amount) || amount < 0) {
+                        this.cashToast = '金額は整数で入力してください';
+                        this.cashToastError = true;
+                        return;
+                    }
+                    // 打开确认弹窗
+                    this.cashConfirmShop = this.cashShop;
+                    this.cashConfirmAmount = amount;
+                    this.cashConfirmOpen = true;
+                },
+
+                // 确认后提交现金入金
+                async confirmSubmitCash() {
+                    this.cashSubmitting = true;
+                    this.cashToast = '';
+                    if (this.cashToastTimer) { clearTimeout(this.cashToastTimer); this.cashToastTimer = null; }
+                    try {
+                        await this.api('cash_log', { shop: this.cashConfirmShop, amount: this.cashConfirmAmount }, 'POST');
+                        this.cashConfirmOpen = false;
+                        this.cashAmount = '';
+                        this.cashToast = '入金を登録しました';
+                        this.cashToastError = false;
+                        this.cashToastTimer = setTimeout(() => { this.cashToast = ''; }, 4000);
+                        await this.loadCashHistory();
+                    } catch (err) {
+                        this.cashToast = '登録に失敗しました';
+                        this.cashToastError = true;
+                    } finally {
+                        this.cashSubmitting = false;
+                    }
+                },
+
+                // 取指定类型的第一条打刻（用于显示时间）
+                getRecord(type) {
+                    return this.records.find(r => r.type === type);
+                },
+
+                // 取指定类型的打刻时间，缺失显示占位符
+                getRecordTime(type) {
+                    const rec = this.getRecord(type);
+                    return rec ? rec.time : '-- : --';
+                },
+
+                // 取指定类型最后一条打刻的时间
+                lastRecordTime(type) {
+                    const list = this.records.filter(r => r.type === type);
+                    return list.length ? list[list.length - 1].time : '-- : --';
+                },
+
+                // ===== 打刻类型元数据（标签/图标/颜色） =====
+                typeMeta(type) {
+                    const map = {
+                        clock_in:  { label: '出勤打刻', icon: 'ph-sun',       color: 'text-amber-500' },
+                        leave_out: { label: '中途退勤', icon: 'ph-sign-out',  color: 'text-amber-600' },
+                        leave_in:  { label: '中途出勤', icon: 'ph-sign-in',   color: 'text-emerald-500' },
+                        clock_out: { label: '退勤打刻', icon: 'ph-house',     color: 'text-indigo-500' },
+                        lunch:     { label: 'ランチタイム', icon: 'ph-coffee', color: 'text-rose-500' },
+                    };
+                    return map[type] || { label: type, icon: 'ph-circle', color: 'text-slate-400' };
+                },
+
+                // 类型对应标签
+                typeLabel(type) {
+                    return this.typeMeta(type).label;
+                },
+
+                // 组装今日打刻卡片数据（出勤、午餐、中途出入、退勤）
+                buildSlots(records, lunch) {
+                    const slots = [];
+                    const push = (type, rec) => {
+                        const meta = this.typeMeta(type);
+                        slots.push({ type, ...meta, time: rec ? rec.time : '--:--', filled: !!rec });
+                    };
+                    push('clock_in', records.find(r => r.type === 'clock_in'));
+                    slots.push({
+                        type: 'lunch',
+                        ...this.typeMeta('lunch'),
+                        time: lunch === 'yes' ? '有り' : '無い',
+                        filled: true,
+                    });
+                    records.filter(r => r.type === 'leave_out' || r.type === 'leave_in')
+                           .forEach(r => push(r.type, r));
+                    push('clock_out', records.find(r => r.type === 'clock_out'));
+                    return slots;
+                },
+
+                // 今日打刻卡片（计算属性）
+                get todaySlots() {
+                    return this.buildSlots(this.records, this.lunch);
+                },
+
+                // 从某天的记录中取指定类型的时间
+                rec(day, type) {
+                    const r = (day.records || []).find(x => x.type === type);
+                    return r ? r.time : '';
+                },
+
+                // 历史记录中某天的午餐标签
+                lunchLabel(day) {
+                    if (day.lunch === null) return '-';
+                    return day.lunch === 'yes' ? 'あり' : 'なし';
+                },
+
+                // 计算星期（0=周日 ... 6=周六）
+                weekdayOf(date) {
+                    return new Date(date + 'T00:00:00').getDay();
+                },
+
+                // YYYY-MM-DD -> M/D
+                dayLabel(date) {
+                    const p = date.split('-');
+                    return Number(p[1]) + '/' + Number(p[2]);
+                },
+
+                // 星期显示（日文）
+                weekLabel(date) {
+                    return '日月火水木金土'[this.weekdayOf(date)];
+                },
+
+                // 周六/周日行背景色
+                dayRowClass(day) {
+                    const d = this.weekdayOf(day.date);
+                    if (d === 6) return 'bg-blue-50 border-blue-200';
+                    if (d === 0) return 'bg-rose-50 border-rose-200';
+                    return 'bg-slate-50 border-slate-100';
+                },
+
+                // 周六/周日文字颜色
+                weekTextClass(day) {
+                    const d = this.weekdayOf(day.date);
+                    if (d === 6) return 'text-blue-600';
+                    if (d === 0) return 'text-rose-600';
+                    return 'text-slate-400';
+                },
+
+                // 打开历史记录弹窗：加载最近 30 天并按天标记是否已完成
+                async openHistory() {
+                    try {
+                        const res = await this.api('history', {});
+                        this.historyDays = (res.days || []).map(day => ({
+                            date: day.date,
+                            lunch: day.lunch,
+                            records: day.records,
+                            done: day.records.some(r => r.type === 'clock_out'),
+                        }));
+                    } catch (err) {
+                        this.historyDays = [];
+                    }
+                    this.historyOpen = true;
+                },
+
+                // 打卡提交动作
+                async handlePunch(type) {
+                    // 中途退勤只允许一次（前端防御性拦截）
+                    if (type === 'leave_out' && !this.canLeaveMidway()) {
+                        return;
+                    }
+                    this.loading = true;
+                    this.lastPunchMessage = '';
+                    this.punchConfirmOpen = false;
+                    this.punchConfirmType = null;
+                    try {
+                        const res = await this.api('punch', { type }, 'POST');
+                        // 乐观更新本地记录，避免再次请求
+                        this.records.push({ type, time: res.time });
+                        this.lastPunchMessage = `${this.typeLabel(type)}完了 (${res.time})`;
+                    } catch (error) {
+                        if (error.message === 'duplicate') {
+                            await this.loadTodayRecords();
+                            this.lastPunchMessage = `${this.typeLabel(type)}は既に記録されています`;
+                        } else {
+                            this.lastPunchMessage = '打刻に失敗しました：サーバーに接続できません';
+                        }
+                    } finally {
+                        this.loading = false;
+                    }
+                }
+            }
+    }
+</script>
+</body>
+</html>
